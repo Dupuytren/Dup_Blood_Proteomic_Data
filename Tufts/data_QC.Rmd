@@ -1,0 +1,128 @@
+---
+title: Somalogic QC
+author: "Anastasia Gurinovich"
+output:
+  html_document:
+    theme: united
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapse: false
+---
+
+
+# Initialize
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+root.dir <- getwd()
+
+library(readxl)
+    library(openxlsx)
+library(dplyr)
+library(ggplot2)
+  library(ggfortify)
+library(tidyverse)
+library(rmeta)
+    library(venn)
+ library(geepack)
+library(pheatmap)
+
+
+# Load packages
+library(tidyverse)
+library(ggrepel)
+
+# A short function for outputting the tables
+knitr_table <- function(x) {
+  x %>% 
+    knitr::kable(format = "html", digits = Inf, 
+                 format.args = list(big.mark = ",")) %>%
+    kableExtra::kable_styling(font_size = 15)
+}
+```
+
+
+```{r } 
+work_dir <- "C:/Users/agurinovich/Box/Sebastiani_BERD/charles_eaton/"
+
+
+```
+
+## Read data
+
+```{r } 
+#prot.data2 <- read_csv(paste0(work_dir, "analysis/SS-2216784_v4.1_EDTAPlasma.hybNorm.medNormInt.plateScale.calibration.anmlQC.qcCheck.anmlSMP.MP.csv"))
+prot.data <- read_csv(paste0(work_dir, "analysis/SS-2216784_v4.1_EDTAPlasma.hybNorm.medNormInt.plateScale.calibration.anmlQC.qcCheck.anmlSMP.QCed.human.proteins.csv"))
+#prot.data2 <- prot.data2[,-1]
+
+#pheno.data2 <- read_excel(paste0(work_dir, "original_data/ID Legends/2023_Cohort_and_Lab_Legend-all_update.xlsx"))
+pheno.data <- read_excel(paste0(work_dir, "original_data/Rosetta_Stone_080923.xlsx"))
+
+all_samples <- names(prot.data)[2:length(names(prot.data))]
+n.samples <- length(all_samples)
+n.prot <- nrow(prot.data)
+prot.names <- prot.data$Assay
+```
+
+###
+Display sample proteomic profiles to look for trends, needs for normalization
+```{r warning=FALSE}
+boxplot(log(prot.data[, all_samples]), las=3, main="Sample profiles")
+
+gg.data <- data.frame(l.prot = unlist(log(prot.data[, all_samples])), samples = as.factor(sort(rep(1:n.samples, n.prot))))
+
+ggplot( gg.data, aes(x=samples, y=l.prot))+
+  geom_boxplot()
+```
+
+###
+Display distribution of some proteins. Are data normally distributed?
+```{r}
+gg.data <- data.frame(l.prot = log(prot.data[, all_samples]))
+ggplot( gg.data, aes(x=gg.data[,1]))+
+  geom_histogram()
+ggplot( gg.data, aes(x=gg.data[,10]))+
+  geom_histogram()
+ggplot( gg.data, aes(x=gg.data[,70]))+
+  geom_histogram()
+```
+
+## Next step: some data exploration.
+For this analysis you need complete data, which we have here (no missingness in this dataset).
+
+```{r, warning=FALSE}
+prot.data.df <- data.frame(prot.data)
+row.names(prot.data.df) <- prot.data$Assay
+prot.data.df <- prot.data.df[,-1]
+
+data.intensity <- data.frame(t(prot.data.df))
+dim(data.intensity)
+log.data.intensity <- log(data.intensity)
+   
+```
+
+## Data visualization
+```{r }
+# display with a heatmap
+library(RColorBrewer)
+coul <- colorRampPalette(brewer.pal(8, "Spectral"))(251)
+heatmap(x=as.matrix(log.data.intensity), Colv = NA, Rowv = NA, scale="row", col = coul, xlab="variable", ylab="car", main="heatmap")
+legend(x="left", legend=c("min", "med", "max"),fill= coul[c(1,26,51)])
+pheatmap(as.matrix(t(log.data.intensity)), color =coul, cluster_rows = T, cluster_cols = T)
+```
+
+## PCA analysis before normalization
+```{r }
+# defines color for Dup and Control
+my.col <- rep(1, nrow(log.data.intensity))
+pheno.data$`Somalogic ID Number` <- paste0("X", pheno.data$`Somalogic ID Number`)
+# substitute space and parentheses on dots:
+pheno.data$`Somalogic ID Number` <- str_replace(str_replace(str_replace(pheno.data$`Somalogic ID Number`, " ", "."), "\\(", "."), "\\)", ".")
+
+my.col[ pheno.data$Cohort[match(row.names(log.data.intensity), pheno.data$`Somalogic ID Number`)] == "Control"] <- 2
+
+
+pca.res <- prcomp((log.data.intensity), scale. = T)
+plot(pca.res)
+ggplot2:: autoplot(pca.res, colour=my.col)
+```

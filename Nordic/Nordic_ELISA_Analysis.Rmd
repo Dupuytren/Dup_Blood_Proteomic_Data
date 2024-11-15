@@ -1,0 +1,197 @@
+---
+title: "Nordic ELISA Analysis"
+output: html_notebook
+---
+
+Load in libraries.
+```{r}
+library(tidyverse)
+library(reshape)
+library(ggpubr)
+library(rstatix)
+library(ggsignif)
+```
+
+Read in data and drop the unwanted analytes.
+```{r}
+orig_data <- read.csv('/~/Data/NordicData_reformatted.csv')
+orig_data$C7M[which(orig_data$C7M=='ND')] <- NA
+data <- orig_data %>% select('Tube', 'Cohort', 'Gender', 'Age', 'C1M_HP', 'C3M_HP', 'PRO.C5_HP', 'PRO.C7_HP', 'CTX.III_HP')
+data
+```
+
+Look at data normality.
+```{r}
+ggqqplot(data, x = 'C1M_HP', facet.by = 'Cohort')
+ggqqplot(data, x = 'C3M_HP', facet.by = 'Cohort')
+ggqqplot(data, x = 'PRO.C5_HP', facet.by = 'Cohort')
+ggqqplot(data, x = 'PRO.C7_HP', facet.by = 'Cohort')
+```
+
+Perform comparisons for designated analytes.
+```{r}
+columns <- c("C1M_HP", "C3M_HP", "PRO.C5_HP", "PRO.C7_HP", "CTX.III_HP")
+
+p_values <- sapply(columns, function(col) {
+  t.test(as.formula(paste(col, "~ Cohort")), data = data)$p.value
+}, USE.NAMES = TRUE)
+
+p_values
+```
+
+Define functions to calculate standard error and fold change.
+```{r}
+# Function to calculate standard error
+calculate_se <- function(data, cohort, column) {
+  cohort_data <- data %>%
+    na.exclude() %>%
+    filter(Cohort == cohort) %>%
+    pull(!!sym(column))
+  
+  se <- sd(cohort_data) / sqrt(length(cohort_data))
+  return(se)
+}
+
+# Function to calculate fold change (FC)
+calculate_fc <- function(data, control_column, cohort_column) {
+  control_sum <- data %>%
+    na.exclude() %>%
+    filter(Cohort == 'Control') %>%
+    summarise(sum_value = sum(!!sym(control_column))) %>%
+    pull(sum_value)
+  
+  dup_sum <- data %>%
+    na.exclude() %>%
+    filter(Cohort == 'Dup') %>%
+    summarise(sum_value = sum(!!sym(cohort_column))) %>%
+    pull(sum_value)
+  
+  fc <- dup_sum / control_sum
+  return(fc)
+}
+```
+
+Calculate SE.
+```{r}
+se_results <- map(columns, function(col) {
+  list(
+    Control = calculate_se(orig_data, 'Control', col),
+    Dup = calculate_se(orig_data, 'Dup', col)
+  )
+})
+
+names(se_results) <- columns
+
+data.frame(se_results)
+```
+
+Calculate FC
+```{r}
+fc_results <- map(columns, function(col) {
+  calculate_fc(orig_data, col, col)
+})
+
+names(fc_results) <- columns
+
+data.frame(fc_results)
+```
+
+Calculate effect size.
+```{r}
+cd_df <- data.frame()
+
+for (analyte in columns) {
+  # Create a dynamic formula using as.formula
+  formula <- as.formula(paste(analyte, "~ Cohort"))
+  
+  res <- cohens_d(formula, data = data, var.equal = TRUE)
+  
+  cd_df <- bind_rows(cd_df, res)
+}
+
+cd_df
+```
+
+Define plotting function.
+```{r}
+violin_plot <- function(data, analyte) {
+  
+  df <- ggplot(data, aes(x = Cohort, y = !!sym(analyte))) +
+    geom_violin(width = 0.5, aes(color = Cohort)) +
+    geom_boxplot(outlier.shape = NA, width = 0.2, coef = 0, aes(color = Cohort)) +
+    geom_signif(comparisons = list(c("Control", "Dup")), map_signif_level = TRUE, textsize = 8.25) +
+    scale_color_manual(values = c("#008000", "#800080")) +
+    geom_jitter(alpha = 0.8, width = 0.1, aes(color = Cohort))
+  
+  return(df)
+}
+```
+
+Prepare plots (with some customization based on analyte).
+```{r}
+C1M <- violin_plot(data, 'C1M_HP') +
+  coord_cartesian(ylim = c(80, 240)) +
+  theme(legend.position="none", text = element_text(size = 18), axis.title.x=element_blank()) + 
+  ylab("C1M (ng/mL)")
+C1M
+
+proC5 <- violin_plot(data, 'PRO.C5_HP') +
+  coord_cartesian(ylim = c(850, 1705)) + 
+  theme(legend.position="none", text = element_text(size = 18), axis.title.x=element_blank()) +
+  ylab("Pro-C5 (ng/mL)")
+proC5
+
+proC7 <- violin_plot(data, 'PRO.C7_HP') +
+  coord_cartesian(ylim = c(20, 85)) +
+  theme(legend.position="none", text = element_text(size = 18), axis.title.x=element_blank())+ 
+  ylab("Pro-C7 (ng/mL)")
+proC7
+
+# Prepped CTX plot slightly differently as the violin is so thin the box size needed to be adjusted
+CTX <- ggplot(data, aes(x = Cohort, y = CTX.III_HP)) + geom_violin(width = 0.8, aes(color = Cohort)) +
+  geom_boxplot(outlier.shape = NA, width = 0.1, coef = 0, aes(color = Cohort)) + 
+  geom_signif(comparisons = list(c("Control","Dup")), map_signif_level=TRUE, textsize = 8.25) + 
+  scale_color_manual(values = c("#008000", "#800080")) +  
+  geom_jitter(alpha = 0.8, width = 0.1, aes(color = Cohort)) +
+  theme(legend.position="none", text = element_text(size = 18), axis.title.x=element_blank()) +
+  ylab("CTX-III (ng/mL)") + 
+  coord_cartesian(ylim = c(20, 605))
+CTX
+```
+
+Create a df of pro/mature collagen ratios.
+```{r}
+ratio_df <- bind_cols(orig_data[,1:4],
+          "Collagen1" = orig_data$PRO.C1_HP/orig_data$C1M_HP,
+          "Collagen3" = orig_data$PRO.C3_roHP/orig_data$C3M_HP,
+          "Collagen4" = orig_data$PRO.C4_HP/orig_data$C4M_HP,
+          "Collagen6" = orig_data$PRO.C6_roHP/orig_data$C6M_HP)
+          # Excluding PRO.C7 as the majority of columns are effectively undetected
+          #"Collagen7" = orig_data$PRO.C7_HP/orig_data$C7M)
+ratio_df
+```
+
+Plot the collagen I ratio.
+```{r}
+col1ratio <- violin_plot(ratio_df, 'Collagen1') +
+  coord_cartesian(ylim = c(min(ratio_df$Collagen1), max(ratio_df$Collagen1)+0.3)) +
+  theme(legend.position="none", text = element_text(size = 18), axis.title.x=element_blank()) +
+  ylab("Pro-C1/C1M")
+col1ratio
+```
+
+Export and save all figures.
+```{r}
+ggsave(filename = "C1M.png", plot = C1M, path = "~/Desktop",  device="png", dpi=600)
+
+ggsave(filename = "Col1Ratio.png", plot = col1ratio, path = "~/Desktop",  device="png", dpi=600)
+
+ggsave(filename = "proC5.png", plot = proC5, path = "~/Desktop",  device="png", dpi=600)
+
+ggsave(filename = "proC7.png", plot = proC7, path = "~/Desktop",  device="png", dpi=600)
+
+ggsave(filename = "CTXIII.png", plot = CTX, path = "~/Desktop",  device="png", dpi=600)
+
+ggsave(filename = "Col1Ratio.png", plot = col1ratio, path = "~/Desktop",  device="png", dpi=600)
+
+```

@@ -1,0 +1,255 @@
+---
+title: "Dup Risk Scores computed with glm/gee"
+output:
+  rmarkdown::html_document:
+    theme: spacelab
+date: '2023-11-24'
+
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(arules)
+library(data.table)
+library(reshape2)
+library(plyr)
+library(gee)
+library(tidyr)
+library(broom)
+library(MLeval)
+library(ggplot2)
+library(caret)
+```
+
+
+```{r, include = FALSE}
+
+getRS <- function(omicsData,
+                  phenoType,
+                  covariate_1 = NULL,
+                  covariate_2 = NULL,
+                  removeCor = TRUE,
+                  family = gaussian()) {
+  if (removeCor == TRUE) {
+    # remove correlated metabolites
+    cormat <-
+      cor(omicsData[colnames(omicsData)], use = "pairwise.complete.obs")
+    melted_cormat <- reshape2::melt(cormat)
+    meta.cor <-
+      melted_cormat[melted_cormat$value >= 0.80 &
+                      melted_cormat$value < 1, ]
+    meta.cor.unique <- unique(meta.cor$Var1)
+    omicsData <-
+      dplyr::select(omicsData, -c(na.omit(meta.cor.unique)))
+  }
+  out_dat <- c()
+  
+  tmpOmicsData <-
+    cbind(omicsData, phenoType, covariate_1, covariate_2)
+  
+  for (i in colnames(omicsData)) {
+    model_log <-
+      glm(
+        tmpOmicsData$phenoType ~ . + tmpOmicsData$covariate_1 + tmpOmicsData$covariate_2,
+        data = tmpOmicsData[i],
+        family = family
+      )
+    sum_out <- summary(model_log)
+    
+    out_dat <- rbind(
+      out_dat,
+      data.frame(
+        Cmp = i,
+        Eff = sum_out$coefficients[i, "Estimate"],
+        SE = sum_out$coefficients[i, "Std. Error"],
+        Pval = sum_out$coefficients[i, "Pr(>|z|)"]
+      )
+    )
+  }
+  
+  out_dat <- type.convert(out_dat, as.is = TRUE)
+  out_dat$Qval <-
+    p.adjust(out_dat$Pval,
+             method = "BH",
+             n = length(out_dat$Pval))
+  out_dat$Eff_corrected <-
+    ifelse(out_dat$Qval < 0.25, out_dat$Eff, 0)
+  
+  # Risk Score computation
+  RS <-
+    as.matrix(omicsData[, colnames(omicsData)]) %*% (out_dat$Eff_corrected /
+                                                       out_dat$SE)
+  
+  return(RS)
+}
+
+getRSgee <- function(omicsData,
+                     phenoType,
+                     covariate_1 = NULL,
+                     covariate_2 = NULL,
+                     id = id,
+                     removeCor = TRUE,
+                     family = gaussian()) {
+  if (removeCor == TRUE) {
+    cormat <-
+      cor(omicsData[colnames(omicsData)], use = "pairwise.complete.obs")
+    melted_cormat <- reshape2::melt(cormat)
+    meta.cor <-
+      melted_cormat[melted_cormat$value >= 0.80 &
+                      melted_cormat$value < 1, ]
+    meta.cor.unique <- unique(meta.cor$Var1)
+    omicsData <-
+      dplyr::select(omicsData, -c(na.omit(meta.cor.unique)))
+  }
+  
+  out_dat <- c()
+  
+  tmpOmicsData <-
+    cbind(omicsData, phenoType, covariate_1, covariate_2, id)
+  tmpOmicsData$phenoType <-
+    as.factor(revalue(tmpOmicsData$phenoType, c(
+      "Control" = 0, "Dup" = 1
+    )))
+  
+  for (i in 1:length(omicsData)) {
+    p <- omicsData[i]
+    
+    loadError <- FALSE
+    err <-
+    try({
+        model1 = suppressMessages(
+          gee(
+            formula = paste0("phenoType ~", names(p), " + covariate_1 + covariate_2"),
+            data = tmpOmicsData,
+            family = family,
+            id = id,
+            silent = FALSE
+          )
+        )
+        model1 <- suppressWarnings(broom::tidy(model1))
+      })
+    
+    loadError <- (is(err, 'try-error') | is(err, 'error'))
+    if (loadError == TRUE) {
+      model1 = data.frame(
+        "term" = c("estimate", names(p)),
+        "Estimate" = c(0, 0),
+        "Naive_S.E." = c(1, 1),
+        "Naive_z" = c(1, 1),
+        "Robust_S.E." = c(1, 1),
+        "Robust_z" = c(1, 1)
+      )
+    }
+    names(model1) <- c("term", "Estimate", "Naive_S.E.", "Naive_z", "Robust_S.E.", "Robust_z")
+    model1$P_value <- (1 - pnorm(abs(model1$Robust_z[2]))) * 2
+    
+    out_dat <- rbind(
+      out_dat,
+      data.frame(
+        Cmp = model1$term[2],
+        Eff = model1$Estimate[2],
+        SE = model1$Robust_S.E.[2],
+        Pval = model1$P_value[2]
+      )
+    )
+  }
+  
+  out_dat <- type.convert(out_dat, as.is = TRUE)
+  out_dat$Qval <-
+    p.adjust(out_dat$Pval,
+             method = "BH",
+             n = length(out_dat$Pval))
+  out_dat$Eff_corrected <-
+    ifelse(out_dat$Qval < 0.25, out_dat$Eff, 0)
+  
+  # Risk Score computation
+  RS <-
+    as.matrix(omicsData) %*% (out_dat$Eff_corrected / out_dat$SE)
+  
+  return(RS)
+  
+}
+
+# train accuracy 
+calc_acc <- function(actual, predicted) {
+  mean(actual == predicted)
+}
+```
+
+ 
+```{r include = FALSE}
+# reading data
+data<- read.csv("/Users/anastasialeshchyk/Downloads/file_for_Ana.csv")
+# remove subject duplicates
+data_RS<- data[!duplicated(data$Subject_id),]
+dim(data_RS)
+omicsData<- data_RS[,8:7002]
+
+# compute the Risk Scores
+DupRS<- getRS(omicsData, as.factor(data_RS$Cohort), data_RS$Age, data_RS$Gender, family = binomial(link = "logit"))
+```
+
+
+```{r include=FALSE}
+omicsData<- data[,8:7002]
+
+# compute the Risk Scores
+DupRS_gee<- getRSgee(omicsData, as.factor(data$Cohort), data$Age, as.factor(data$Gender), id = data$Subject_id, family = binomial(link = "logit"))
+```
+
+
+## Results {.tabset}
+
+### GML
+
+```{r}
+plot(DupRS)
+```
+
+### GEE
+
+```{r}
+hist(DupRS_gee)
+```
+
+```{r}
+data_Dup_RS<- data.frame(Cohort = data$Cohort, DupRS=DupRS_gee)
+ggplot(data_Dup_RS, aes(x=Cohort, y=DupRS, color = Cohort)) + 
+  geom_boxplot()
+```
+
+```{r}
+set.seed(430)
+data_idx = createDataPartition(data_Dup_RS$Cohort, p = 0.75, list = FALSE)
+data_trn = data_Dup_RS[data_idx, ]
+data_tst = data_Dup_RS[-data_idx, ]
+
+
+data_glm_mod = train(
+  form = Cohort ~ DupRS,
+  data = data_trn,
+  trControl = trainControl(method = "LOOCV", summaryFunction = twoClassSummary, classProbs = TRUE),
+  method = "glm",
+  family = binomial(link="logit")
+)
+
+data_glm_mod$results
+summary(data_glm_mod)
+```
+
+
+```{r include=FALSE}
+x <- evalm(data_glm_mod)
+```
+
+```{r}
+x$roc
+# Train accuracy
+calc_acc(actual = data_trn$Cohort, predicted = predict(data_glm_mod, data.frame(DupRS = data_trn$DupRS)))
+# Test accuracy
+calc_acc(actual = data_tst$Cohort, predicted = predict(data_glm_mod, data.frame(DupRS = data_tst$DupRS)))
+```
+
+
+
+

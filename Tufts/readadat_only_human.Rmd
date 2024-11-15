@@ -1,0 +1,81 @@
+---
+title: "Adat to CSV with Human proteins only"
+author: "Anastasia Gurinovich"
+output: 
+   html_document:
+    theme: united
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapse: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("SomaDataIO")
+library("reshape")
+library("data.table")
+library("readr")
+library("dplyr")
+```
+
+## Initialize
+```{r }
+work_dir <- "C:/Users/agurinovich/Box/Sebastiani_BERD/"
+
+file_name <-
+  "SS-2216784_v4.1_EDTAPlasma.hybNorm.medNormInt.plateScale.calibration.anmlQC.qcCheck.anmlSMP"
+
+fl <- file_name
+
+my_adat <- read_adat(paste0(work_dir, "charles_eaton/original_data/Somalogic Aptamer Proteomic Data/", fl, ".adat"))
+my_adat
+
+# get the aptamer info
+Analyte_info <- getAnalyteInfo(my_adat)
+Analyte_info
+
+# Protein Source Organism filtering
+table(Analyte_info$Organism)
+
+# get the "Human" aptamers
+analyte_info_human <- Analyte_info[Analyte_info$Organism == "Human",]
+
+# filter out the aptamers in the my_adat object
+soma_adat_df <- as.data.frame(my_adat)
+soma_adat_df_human <- soma_adat_df[,c(colnames(soma_adat_df)[1:33], analyte_info_human$AptName)]
+
+new_names <- paste0(names(soma_adat_df_human[, grep("seq.", colnames(soma_adat_df_human))]), sep = "_", analyte_info_human$UniProt, sep = "_", analyte_info_human$EntrezGeneSymbol)
+
+# update the original seq names
+names(soma_adat_df_human)[grep("seq.", colnames(soma_adat_df_human))] <- new_names
+
+## QC
+# removing the control and buffer samples, leaving the samples only for the analysis
+soma_adat_df_human <- soma_adat_df_human[soma_adat_df_human$SampleType == "Sample", ]
+
+# RowCheck (Normalization acceptance criteria for all row scale factors) 
+soma_adat_df_human <- soma_adat_df_human[soma_adat_df_human$RowCheck == "PASS",]
+
+row.names(soma_adat_df_human) <- soma_adat_df_human$SampleId
+
+# transpose the data
+my_adat_df <- as.data.frame(t(soma_adat_df_human[, grep("seq.", colnames(soma_adat_df_human))]))
+
+my_adat_df$Assay <- new_names
+
+my_adat_df <- my_adat_df %>%
+  as_tibble() %>%
+  select(Assay, everything())
+
+#ColCheck (QC acceptance criteria across all plates/sets)
+analyte_info_human <- analyte_info_human %>%
+  filter(ColCheck == 'PASS')
+
+analyte_info_human$prot_ids <- paste0(analyte_info_human$AptName, sep = "_", analyte_info_human$UniProt, sep = "_", analyte_info_human$EntrezGeneSymbol)
+
+my_adat_df <- my_adat_df %>%
+  filter(Assay %in% analyte_info_human$prot_ids)
+
+write_csv(my_adat_df, paste0(work_dir, "charles_eaton/analysis/", fl, ".QCed.human.proteins.csv"))
+```

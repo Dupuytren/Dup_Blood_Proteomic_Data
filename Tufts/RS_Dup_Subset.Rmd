@@ -1,0 +1,342 @@
+---
+title: "Dup Risk Scores computed with glm/gee fo the subset of 422 seqIds"
+output:
+  rmarkdown::html_document:
+    theme: spacelab
+date: '2023-11-24'
+
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(arules)
+library(data.table)
+library(reshape2)
+library(plyr)
+library(gee)
+library(tidyr)
+library(broom)
+library(MLeval)
+library(ggplot2)
+library(caret)
+library(ggsignif)
+library(readxl)
+```
+
+
+```{r, include = FALSE}
+
+getRS <- function(omicsData,
+                  phenoType,
+                  covariate_1 = NULL,
+                  covariate_2 = NULL,
+                  removeCor = TRUE,
+                  family = gaussian()) {
+  if (removeCor == TRUE) {
+    # remove correlated metabolites
+    cormat <-
+      cor(omicsData[colnames(omicsData)], use = "pairwise.complete.obs")
+    melted_cormat <- reshape2::melt(cormat)
+    meta.cor <-
+      melted_cormat[abs(melted_cormat$value) >= 0.80 &
+                      abs(melted_cormat$value) < 1, ]
+    meta.cor.unique <- unique(meta.cor$Var1)
+    omicsData <-
+      dplyr::select(omicsData, -c(na.omit(meta.cor.unique)))
+  }
+  out_dat <- c()
+  
+  tmpOmicsData <-
+    cbind(omicsData, phenoType, covariate_1, covariate_2)
+  
+  for (i in colnames(omicsData)) {
+    model_log <-
+      glm(
+        tmpOmicsData$phenoType ~ . + tmpOmicsData$covariate_1 + tmpOmicsData$covariate_2,
+        data = tmpOmicsData[i],
+        family = family
+      )
+    sum_out <- summary(model_log)
+    
+    out_dat <- rbind(
+      out_dat,
+      data.frame(
+        Cmp = i,
+        Eff = sum_out$coefficients[i, "Estimate"],
+        SE = sum_out$coefficients[i, "Std. Error"],
+        Pval = sum_out$coefficients[i, "Pr(>|z|)"]
+      )
+    )
+  }
+  
+  out_dat <- type.convert(out_dat, as.is = TRUE)
+  out_dat$Qval <-
+    p.adjust(out_dat$Pval,
+             method = "BH",
+             n = length(out_dat$Pval))
+  out_dat$Eff_corrected <-
+    ifelse(out_dat$Qval < 0.25, out_dat$Eff, 0)
+  
+  # Risk Score computation
+  RS <-
+    as.matrix(omicsData[, colnames(omicsData)]) %*% (out_dat$Eff_corrected /
+                                                       out_dat$SE)
+  
+  return(RS)
+}
+
+getRSgee <- function(omicsData,
+                     phenoType,
+                     covariate_1 = NULL,
+                     covariate_2 = NULL,
+                     id = id,
+                     removeCor = TRUE,
+                     family = gaussian()) {
+  meta.cor<- c()
+  if (removeCor == TRUE) {
+    cormat <-
+      cor(omicsData[colnames(omicsData)], use = "pairwise.complete.obs")
+    melted_cormat <- reshape2::melt(cormat)
+     melted_cormat<- type.convert(melted_cormat, as.is = TRUE)
+    meta.cor <-
+      melted_cormat[abs(melted_cormat$value) >= 0.80 &
+                      abs(melted_cormat$value) < 1, ]
+    meta.cor.unique <- unique(meta.cor$Var1)
+    omicsData <-
+      dplyr::select(omicsData, -c(na.omit(meta.cor.unique)))
+  }
+  
+  out_dat <- c()
+  
+  tmpOmicsData <-
+    cbind(omicsData, phenoType, covariate_1, covariate_2, id)
+  tmpOmicsData$phenoType <-
+    as.factor(revalue(tmpOmicsData$phenoType, c(
+      "Control" = 0, "Dup" = 1
+    )))
+  
+  for (i in 1:length(omicsData)) {
+    p <- omicsData[i]
+    
+    loadError <- FALSE
+    err <-
+    try({
+        model1 = suppressMessages(
+          gee(
+            formula = paste0("phenoType ~", names(p), " + covariate_1 + covariate_2"),
+            data = tmpOmicsData,
+            family = family,
+            id = id,
+            silent = FALSE
+          )
+        )
+        model1 <- suppressWarnings(broom::tidy(model1))
+      })
+    
+    loadError <- (is(err, 'try-error') | is(err, 'error'))
+    if (loadError == TRUE) {
+      model1 = data.frame(
+        "term" = c("estimate", names(p)),
+        "Estimate" = c(0, 0),
+        "Naive_S.E." = c(1, 1),
+        "Naive_z" = c(1, 1),
+        "Robust_S.E." = c(1, 1),
+        "Robust_z" = c(1, 1)
+      )
+    }
+    names(model1) <- c("term", "Estimate", "Naive_S.E.", "Naive_z", "Robust_S.E.", "Robust_z")
+    model1$P_value <- (1 - pnorm(abs(model1$Robust_z[2]))) * 2
+    
+    out_dat <- rbind(
+      out_dat,
+      data.frame(
+        Cmp = model1$term[2],
+        Eff = model1$Estimate[2],
+        SE = model1$Robust_S.E.[2],
+        Pval = model1$P_value[2]
+      )
+    )
+  }
+  
+  out_dat <- type.convert(out_dat, as.is = TRUE)
+  out_dat$Qval <-
+    p.adjust(out_dat$Pval,
+             method = "BH",
+             n = length(out_dat$Pval))
+  out_dat$Eff_corrected <-
+    ifelse(out_dat$Qval < 0.25, out_dat$Eff, 0)
+  
+  # Risk Score computation
+  RS <-
+    as.matrix(omicsData) %*% (out_dat$Eff_corrected / out_dat$SE)
+  return_list<- list(RS = RS, out_dat= out_dat, cormat = melted_cormat)
+  return(return_list)
+  
+}
+
+# train accuracy 
+calc_acc <- function(actual, predicted) {
+  mean(actual == predicted)
+}
+```
+
+ 
+```{r include = FALSE}
+# reading data
+data<- read.csv("/Users/anastasialeshchyk/Downloads/file_for_Ana.csv")
+
+subSet<- read_excel("/Users/anastasialeshchyk/Downloads/Top-down-Somalogic-SeqIDs.xlsx")
+subSet$original_string<- paste0("seq.", subSet$`445 Unique SeqIDs`)
+subSet$original_string <- gsub("-", ".", subSet$original_string)
+
+
+original_colnames<- colnames(data)[8:7002]
+transformed_colnames <- gsub("_.*", "", original_colnames)
+colnames(data)[8:7002]<- transformed_colnames
+cols<- c(colnames(data)[1:7], transformed_colnames[transformed_colnames %in% subSet$original_string])
+
+data<- data[cols]
+# SeqIds not present in the original dataset
+#subSet$original_string[!subSet$original_string %in% transformed_colnames]
+```
+
+
+```{r include=FALSE}
+omicsData<- data[,8:429]
+
+# compute the Risk Scores
+DupRS_gee<- getRSgee(omicsData, as.factor(data$Cohort), data$Age, as.factor(data$Gender), id = data$Subject_id, family = binomial(link = "logit"))
+```
+
+
+## Results {.tabset}
+
+### GEE
+
+```{r}
+hist(DupRS_gee$RS, main = "Histogram of ProtRS of Dupuytren's constructure")
+```
+
+### Aptamers contributing to the DupPRS  
+
+```{r}
+DupRS_gee$out_dat[DupRS_gee$out_dat$Eff_corrected != 0,]
+
+tmp_dat<-  DupRS_gee$out_dat[DupRS_gee$out_dat$Eff_corrected != 0,]
+
+new_str<- merge(subSet, tmp_dat, by.x = "original_string", by.y = "Cmp")
+new_str$combined_str<- paste0(new_str$original_string, "_", new_str$`327 Unique Uniprots associated with these 445 Unique SeqIDs`)
+
+
+ggplot(new_str, aes(x=Eff_corrected, y=combined_str))+
+geom_point(size = 3) +
+  geom_vline(xintercept = 0, lty = 2) +
+  labs(
+    x = "Beta estimate coefficient",
+    y = NULL,
+    title = "Aptamers effect on Dupuytren's status (based on 422 seqIds)")+
+   theme(axis.text = element_text(size = 15),
+            axis.title = element_text(size = 15))
+```
+
+```{r include = FALSE}
+# head(DupRS_gee$cormat)
+# 
+# cormat<-DupRS_gee$cormat
+# cormat$Var1<- as.character(cormat$Var1)
+# cormat$Var2<- as.character(cormat$Var2)
+# 
+# apt_names<- DupRS_gee$out_dat[DupRS_gee$out_dat$Eff_corrected != 0,]$Cmp
+# 
+# apt1_cor<- cormat[cormat$Var1 == apt_names[1],]
+# apt2_cor<- cormat[cormat$Var1 == apt_names[2],]
+# 
+# apt2_cor[order(apt2_cor$value),]
+# 
+#  apt2_cor_low <-
+#       apt2_cor[apt2_cor$value <= 0.60 &
+#                       apt2_cor$value < 1,]
+#  apt2_cor_high
+#  
+#  apt1_cor_high
+#  min(apt2_cor_low$value)
+```
+
+
+```{r}
+data_Dup_RS<- data.frame(Cohort = data$Cohort, DupRS=DupRS_gee$RS, Subject_id = data$Sample_id)
+ggplot(data_Dup_RS, aes(x=Cohort, y=DupRS)) + 
+  geom_boxplot()+theme(axis.text=element_text(size=15))+
+  geom_signif(comparisons = list(c("Dupuytren's constucture", "Control")), test = "wilcox.test",
+               map_signif_level = function(p) sprintf("p = %.2g", p))+
+  theme(axis.text.x=element_text(size=15), axis.text.y=element_text(size=15))+
+  theme_light()
+  
+
+t.test(data_Dup_RS[data_Dup_RS$Cohort== "Dup",]$DupRS, data_Dup_RS[data_Dup_RS$Cohort == "Control",]$DupRS)
+```
+
+```{r}
+set.seed(430)
+data_idx = createDataPartition(data_Dup_RS$Cohort, p = 0.75, list = FALSE)
+data_trn = data_Dup_RS[data_idx, ]
+data_tst = data_Dup_RS[-data_idx, ]
+
+
+data_glm_mod = train(
+  form = Cohort ~ DupRS,
+  data = data_trn,
+  trControl = trainControl(method = "LOOCV", summaryFunction = twoClassSummary, classProbs = TRUE),
+  method = "glm",
+  family = binomial(link="logit")
+)
+
+data_glm_mod$results
+summary(data_glm_mod)
+```
+
+
+```{r include=FALSE}
+x <- evalm(data_glm_mod)
+```
+
+```{r}
+x$roc
+# Train accuracy
+calc_acc(actual = data_trn$Cohort, predicted = predict(data_glm_mod, data.frame(DupRS = data_trn$DupRS)))
+# Test accuracy
+calc_acc(actual = data_tst$Cohort, predicted = predict(data_glm_mod, data.frame(DupRS = data_tst$DupRS)))
+```
+### Group comparison
+
+```{r}
+groupData<- read_excel("/Users/anastasialeshchyk/Downloads/Age_at_First_Procedure.xlsx", sheet = "Ages At Procedures", na = c("", NA, "NA"))
+colnames(groupData)<- c("Group 1", "Group 2", "Group 3")
+
+
+# editing the ids in the excel file to match them in the original file
+groupData$`Group 1`<- paste0("X", groupData$`Group 1`)
+groupData$`Group 2`<- paste0("X", groupData$`Group 2`)
+groupData$`Group 3`<- paste0("X", groupData$`Group 3`)
+
+# fixing some id problems
+groupData$`Group 1`[12] = "X86865..37."
+groupData$`Group 1`[14] = "X75838..3."
+groupData$`Group 2`[35] = "X87149..44."
+
+data_Dup_RS$Group<- ifelse(as.character(data_Dup_RS$Subject_id) %in% groupData$`Group 1`, "Group 1", ifelse(as.character(data_Dup_RS$Subject_id) %in% groupData$`Group 2`, "Group 2", ifelse(as.character(data_Dup_RS$Subject_id) %in% groupData$`Group 3`, "Group 3" , NA)))
+
+table(data_Dup_RS$Group)
+```
+
+```{r}
+# ANOVA
+data_Dup_RSPpl<- na.omit(data_Dup_RS)
+GroupRes <- anova(lm(DupRS ~ Group, data = data_Dup_RSPpl))
+GroupRes
+
+# boxplot vis
+boxplot(data_Dup_RSPpl[data_Dup_RSPpl$Group == "Group 1",]$DupRS, data_Dup_RSPpl[data_Dup_RSPpl$Group == "Group 2",]$DupRS, data_Dup_RSPpl[data_Dup_RSPpl$Group == "Group 3",]$DupRS,
+main = "Group boxplots of DupRS for comparision", names = c("Group 1", "Group 2", "Group 3"))
+```
+

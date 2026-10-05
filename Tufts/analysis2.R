@@ -5,7 +5,8 @@ library(tidyr)
 library(broom)
 library(gee)
 
-work_dir <- "C:/Users/agurinovich/Box/Sebastiani_BERD/charles_eaton/"
+# Set this to the top-level directory containing the Dup_Blood_Proteomic_Data project
+work_dir <- "SET ME BEFORE FIRST RUN"
 
 prot.data <- read_csv(paste0(work_dir,  "analysis/SS-2216784_v4.1_EDTAPlasma.hybNorm.medNormInt.plateScale.calibration.anmlQC.qcCheck.anmlSMP.QCed.human.proteins.csv"))
 
@@ -21,15 +22,36 @@ dim(data.intensity)
 data.intensity$`Somalogic ID Number` <- row.names(data.intensity)
 data.intensity <- as_tibble(data.intensity) %>%
   select(`Somalogic ID Number`, everything()) %>%
-  rename(Sample_id = `Somalogic ID Number`)
+  dplyr::rename(Sample_id = `Somalogic ID Number`)
 data.intensity
 
-pheno.data <- read_excel(paste0(work_dir, "original_data/Rosetta_Stone_080923.xlsx"))
+# Note there is no original_data/Rosetta_Stone_080923.xlsx in the Github as of 10/05/2026. I used Rosetta_Stone.xlsx and got desired results
+pheno.data <- read_excel(paste0(work_dir, "Rosetta_Stone.xlsx")) #"original_data/Rosetta_Stone_080923.xlsx"))
 pheno.data
+
+# Cleanup hidden characters in names from excel file which were causing issues
+column_names <- names(pheno.data)
+
+column_names <- gsub(
+  "\u00A0",
+  " ",
+  column_names,
+  fixed = TRUE
+)
+
+column_names <- trimws(column_names)
+
+column_names <- gsub(
+  "[[:space:]]+",
+  " ",
+  column_names
+)
+
+names(pheno.data) <- column_names
 
 pheno.data <- pheno.data %>%
   select(`Somalogic ID Number`, `Subject ID`, Draw, Cohort, `Age at draw`, Gender) %>%
-  rename(Sample_id = `Somalogic ID Number`, Redraw_id = `Subject ID`, Age = `Age at draw`)
+  dplyr::rename(Sample_id = `Somalogic ID Number`, Redraw_id = `Subject ID`, Age = `Age at draw`)
 pheno.data
 
 # to remove samples that are not in the QCed protein data
@@ -176,7 +198,7 @@ model1
 
 prot_list <- read_excel(paste0(work_dir, "analysis/Top-down Somalogic SeqIDs.xlsx"))
 prot_list <- prot_list %>%
-  rename(Aptamer_id = `445 Unique SeqIDs`, Uniprot2 = `327 Unique Uniprots associated with these 445 Unique SeqIDs`)
+  dplyr::rename(Aptamer_id = `445 Unique SeqIDs`, Uniprot2 = `327 Unique Uniprots associated with these 445 Unique SeqIDs`)
 prot_list
 
 model1$Aptamer_id <- str_replace(str_replace(model1$Aptamer_id, "seq.", ""), "\\.", "-")
@@ -199,3 +221,4 @@ prot_list2 <- prot_list2 %>%
 prot_list2
 
 write_csv(prot_list2, paste0(work_dir, "analysis/Updated_protein_list_adjusted_pvalues.csv"))
+
